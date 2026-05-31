@@ -21,8 +21,9 @@ type Item = { code: string; name: string; isExternal?: boolean };
 
 export default function ScannerScreen({ navigation, route }: ScannerScreenProps) {
   const { brand } = useBrand();
-  const PRIMARY = brand.corPrimaria || DEFAULT_BRAND.corPrimaria;
+  const primary = brand.corPrimaria || DEFAULT_BRAND.corPrimaria;
   const DARK = brand.corSecundaria || DEFAULT_BRAND.corSecundaria;
+  const styles = React.useMemo(() => createStyles(primary), [primary]);
   const { inventario } = route.params;
 
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -65,21 +66,22 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     setIsScanning(false);
     Vibration.vibrate(80);
     setLoadingProduct(true);
+    const productCode = result.productCode;
     try {
-      const found = await consultarProduto(inventario.id, result.productCode);
+      const found = await consultarProduto(inventario.id, productCode);
       if (!found) {
-        setNotFoundCode(result.productCode);
+        setNotFoundCode(productCode);
         Alert.alert(
           'Produto não encontrado',
-          `O código ${result.productCode} não está neste inventário.`,
+          `O código ${productCode} não está neste inventário.`,
           [
             { text: 'Cancelar', style: 'cancel', onPress: () => setIsScanning(true) },
             {
               text: 'Cadastrar externo',
               onPress: () => {
                 setItem({
-                  code: result.productCode,
-                  name: buildExternalProductName('', result.productCode),
+                  code: productCode,
+                  name: buildExternalProductName('', productCode),
                   isExternal: true,
                 });
                 setExternalName('');
@@ -92,7 +94,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
         return;
       }
       setNotFoundCode(null);
-      setItem({ code: result.productCode, name: found.produto.nome_produto });
+      setItem({ code: productCode, name: found.produto.nome_produto });
       setExternalName('');
       setQuantity('');
       setTimeout(() => qtyRef.current?.focus(), 250);
@@ -186,26 +188,26 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
   };
 
   if (hasPermission === null) {
-    return <View style={styles.center}><ActivityIndicator color={PRIMARY} /></View>;
+    return <View style={styles.center}><ActivityIndicator color={primary} /></View>;
   }
 
   const isAvariaLote = selectedLote === 'AVARIA' || selectedLote === 'VENCIMENTO';
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+    <SafeAreaView style={[styles.container, { backgroundColor: DARK }]} edges={['top', 'bottom']}>
       <Modal visible={submitting} transparent animationType="fade">
         <View style={styles.overlay}>
           <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color={PRIMARY} />
+            <ActivityIndicator size="large" color={primary} />
             <Text style={styles.loadingTxt}>Enviando para o servidor...</Text>
           </View>
         </View>
       </Modal>
 
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { backgroundColor: primary }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back" size={18} color={PRIMARY} />
+          <Ionicons name="arrow-back" size={18} color={primary} />
           <Text style={styles.backTxt}>Voltar</Text>
         </TouchableOpacity>
         <View style={{ alignItems: 'center' }}>
@@ -225,7 +227,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
         <Text style={styles.loteLabel}>Lote:</Text>
         <TouchableOpacity style={styles.loteDropdown} onPress={() => setShowLoteModal(true)}>
           <Text style={styles.loteValue}>{selectedLote}</Text>
-          <Text style={{ color: PRIMARY }}>▼</Text>
+          <Text style={{ color: primary }}>▼</Text>
         </TouchableOpacity>
       </View>
 
@@ -338,7 +340,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
               keyExtractor={(l) => l}
               renderItem={({ item: l }) => (
                 <TouchableOpacity
-                  style={[styles.loteOption, selectedLote === l && { backgroundColor: PRIMARY }]}
+                  style={[styles.loteOption, selectedLote === l && { backgroundColor: primary }]}
                   onPress={() => { setSelectedLote(l); setShowLoteModal(false); }}
                 >
                   <Text style={[styles.loteOptionTxt, selectedLote === l && { color: '#FFF', fontWeight: '700' }]}>{l}</Text>
@@ -366,9 +368,9 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue} numberOfLines={2}>{value}</Text>
+    <View style={ROW_STYLES.row}>
+      <Text style={ROW_STYLES.rowLabel}>{label}</Text>
+      <Text style={ROW_STYLES.rowValue} numberOfLines={2}>{value}</Text>
     </View>
   );
 }
@@ -379,15 +381,21 @@ function buildExternalProductName(input: string, fallbackCode: string) {
   return trimmed;
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: DARK },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: DARK },
+const ROW_STYLES = StyleSheet.create({
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', paddingVertical: 6, gap: 8 },
+  rowLabel: { color: '#666', fontSize: 13, fontWeight: '600', minWidth: 80 },
+  rowValue: { flex: 1, color: '#111', fontSize: 14, textAlign: 'right' },
+});
+
+const createStyles = (primary: string) => StyleSheet.create({
+  container: { flex: 1 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    backgroundColor: PRIMARY, paddingHorizontal: 16, paddingVertical: 12,
+    paddingHorizontal: 16, paddingVertical: 12,
   },
   backBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, gap: 4 },
-  backTxt: { color: PRIMARY, fontWeight: 'bold', fontSize: 12 },
+  backTxt: { color: primary, fontWeight: 'bold', fontSize: 12 },
   headerTitle: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
   headerSub: { color: '#FFF', opacity: 0.85, fontSize: 11 },
   modeBtn: { backgroundColor: '#FFF', borderRadius: 8, padding: 8 },
@@ -398,26 +406,24 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
   },
   loteValue: { color: '#111', fontWeight: '500' },
-  cameraBox: { height: 140, marginHorizontal: 16, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: PRIMARY },
+  cameraBox: { height: 140, marginHorizontal: 16, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: primary },
   manualBox: { flexDirection: 'row', marginHorizontal: 16, gap: 8 },
   manualInput: { flex: 1, backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: '#000' },
-  manualBtn: { backgroundColor: PRIMARY, borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
-  card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderLeftWidth: 3, borderLeftColor: PRIMARY },
-  cardLabel: { color: PRIMARY, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', marginBottom: 8 },
-  row: { flexDirection: 'row', alignItems: 'center', marginBottom: 6, gap: 8 },
-  rowLabel: { color: '#444', fontSize: 13, fontWeight: '600', width: 90 },
-  rowValue: { flex: 1, textAlign: 'right', color: '#111', fontWeight: '700' },
+  manualBtn: { backgroundColor: primary, borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
+  card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderLeftWidth: 3, borderLeftColor: primary },
+  cardLabel: { color: primary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', marginBottom: 8 },
+  rowLabel: { color: '#666', fontSize: 13, fontWeight: '600', minWidth: 80 },
   qtyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 8 },
   qtyInput: {
-    flex: 1, borderWidth: 2, borderColor: PRIMARY, borderRadius: 8,
+    flex: 1, borderWidth: 2, borderColor: primary, borderRadius: 8,
     paddingHorizontal: 12, paddingVertical: 8, textAlign: 'center', color: '#111', fontSize: 18,
   },
   avariaBox: { marginTop: 12, gap: 8 },
   thumb: { width: '100%', height: 120, borderRadius: 10 },
-  avariaBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: PRIMARY, borderRadius: 8, paddingVertical: 12 },
+  avariaBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: primary, borderRadius: 8, paddingVertical: 12 },
   avariaBtnTxt: { color: '#FFF', fontWeight: '700' },
   bottom: { padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)' },
-  saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: PRIMARY, borderRadius: 12, paddingVertical: 16 },
+  saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: primary, borderRadius: 12, paddingVertical: 16 },
   saveTxt: { color: '#FFF', fontSize: 17, fontWeight: 'bold' },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   loadingBox: { backgroundColor: '#FFF', padding: 30, borderRadius: 14, alignItems: 'center' },

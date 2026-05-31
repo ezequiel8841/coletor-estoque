@@ -58,7 +58,7 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
     });
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={[styles.container, { backgroundColor: DARK }]}>
       <StatusBar style="light" />
       <View style={styles.header}>
         <Text style={styles.title}>Selecionar Inventário</Text>
@@ -77,7 +77,7 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
           autoCapitalize="characters"
           maxLength={6}
         />
-        <TouchableOpacity style={styles.codeBtn} onPress={abrirPorCodigo}>
+        <TouchableOpacity style={[styles.codeBtn, { backgroundColor: PRIMARY }]} onPress={abrirPorCodigo}>
           <Ionicons name="arrow-forward" size={20} color="#FFF" />
         </TouchableOpacity>
       </View>
@@ -111,7 +111,7 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: DARK },
+  container: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 20, paddingVertical: 16,
@@ -121,7 +121,7 @@ const styles = StyleSheet.create({
   codeInput: {
     flex: 1, backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, color: '#000',
   },
-  codeBtn: { backgroundColor: PRIMARY, borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
+  codeBtn: { borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
   card: {
     flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF',
     borderRadius: 10, padding: 16, marginBottom: 10,

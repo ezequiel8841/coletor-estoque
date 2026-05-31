@@ -33,13 +33,54 @@ Valores esperados para este projeto InvStock:
 - `npm run android` roda no Android local
 - `npm run web` roda versão web para testes rápidos
 
-## Build APK com EAS
+## Build APK com EAS (instalar no celular)
 
-1. Faça login: `npx eas login`
-2. Configure projeto: `npx eas build:configure`
-3. Gere APK: `npx eas build -p android --profile preview`
+O projeto já inclui `eas.json` com perfil **`preview`** (gera `.apk`).
 
-> A primeira build pode exigir configuração de credenciais Android (keystore) no EAS.
+### Pré-requisitos
+
+1. **Backend InvStock** — migration `20260530200000_coletor_estoque.sql` aplicada no Supabase.
+2. **Conta Expo** gratuita: [https://expo.dev/signup](https://expo.dev/signup)
+3. **EAS CLI**: `npm install -g eas-cli`
+
+### Passo a passo
+
+```bash
+cd coletor-estoque
+npm install
+npx eas login
+npx eas init          # vincula o app ao seu projeto Expo (só na 1ª vez)
+```
+
+Configure a **anon key** como secret (não commitar no git):
+
+```bash
+npx eas secret:create --scope project --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value "SUA_ANON_KEY_AQUI"
+```
+
+A URL do Supabase já está no perfil `preview` do `eas.json`. Se mudar de projeto, atualize lá ou crie também:
+
+```bash
+npx eas secret:create --scope project --name EXPO_PUBLIC_SUPABASE_URL --value "https://aygjmtoubunzozpfxvrq.supabase.co"
+```
+
+Gere o APK:
+
+```bash
+npm run build:apk
+# ou: npx eas build --platform android --profile preview
+```
+
+Na **primeira build**, o EAS pergunta sobre credenciais Android — escolha **Let Expo handle credentials** (recomendado).
+
+Quando terminar (~10–20 min), abra o link no terminal ou em [expo.dev](https://expo.dev) → Projects → Builds, baixe o `.apk` e instale no Android (permitir instalação de fontes desconhecidas).
+
+### Teste rápido sem APK
+
+```bash
+npm start
+# Expo Go no celular + QR code (mesma rede ou --tunnel)
+```
 
 ## White-label
 
@@ -47,8 +88,16 @@ A identidade visual (nome, cores, logo) é carregada do backend por organizaçã
 
 ## Fallback de produto não encontrado
 
-Quando um código não existe no inventário, o app permite continuar como **produto externo** para não bloquear a coleta. O fallback IA por foto está previsto no backend web (`identifyProductByImage`) e atualmente retorna stub controlado.
+Quando um código não existe no inventário, o app permite continuar como **produto externo** para não bloquear a coleta. O fallback IA por foto está previsto no backend web (`identifyProductFromImage`) e atualmente retorna stub controlado (com alias de compatibilidade `identifyProductByImage`).
+
+## Verificação de tipos
+
+Para validar rapidamente o projeto antes de gerar APK:
+
+```bash
+npx tsc --noEmit
+```
 
 ## Nome do app
 
-O projeto está configurado com nome **Coletor Estoque** em `app.json`.
+O projeto está configurado com nome **Coletor Estoque** em `app.config.ts`.
