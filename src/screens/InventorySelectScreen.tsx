@@ -34,9 +34,9 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
   useEffect(() => { carregar(); }, [carregar]);
 
   const abrirPorCodigo = async () => {
-    const c = codigo.trim().toUpperCase();
-    if (c.length !== 6) {
-      Alert.alert('Erro', 'O código de acesso deve ter 6 caracteres.');
+    const c = codigo.trim();
+    if (!/^\d{6}$/.test(c)) {
+      Alert.alert('Erro', 'O código de acesso deve ter 6 números.');
       return;
     }
     try {
@@ -71,10 +71,11 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
         <TextInput
           style={styles.codeInput}
           value={codigo}
-          onChangeText={setCodigo}
-          placeholder="Código de acesso (ex: UR78CF)"
+          onChangeText={(t) => setCodigo(t.replace(/\D/g, '').slice(0, 6))}
+          placeholder="000000"
           placeholderTextColor="#888"
-          autoCapitalize="characters"
+          keyboardType="number-pad"
+          inputMode="numeric"
           maxLength={6}
         />
         <TouchableOpacity style={[styles.codeBtn, { backgroundColor: PRIMARY }]} onPress={abrirPorCodigo}>

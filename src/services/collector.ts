@@ -52,7 +52,7 @@ export async function buscarInventarioPorCodigo(codigo: string): Promise<Inventa
   const { data, error } = await supabase
     .from('inventarios')
     .select('id, nome, setor, status, codigo_acesso, organizacao_id')
-    .eq('codigo_acesso', codigo.trim().toUpperCase())
+    .eq('codigo_acesso', codigo.trim())
     .maybeSingle();
   if (error) throw new Error(error.message);
   return (data as Inventario) ?? null;
