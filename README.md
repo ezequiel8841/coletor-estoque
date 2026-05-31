@@ -22,6 +22,11 @@ Preencha no `.env`:
 - `EXPO_PUBLIC_SUPABASE_URL`
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
 
+Valores esperados para este projeto InvStock:
+
+- `EXPO_PUBLIC_SUPABASE_URL=https://aygjmtoubunzozpfxvrq.supabase.co`
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY=<anon key do projeto>`
+
 ## Scripts úteis
 
 - `npm start` inicia o Metro/Expo
@@ -38,8 +43,11 @@ Preencha no `.env`:
 
 ## White-label
 
-A identidade visual (nome, cores, logo) deve ser carregada do backend por organização.
-Hoje o projeto usa o branding padrão e está preparado para evoluir o tema dinâmico.
+A identidade visual (nome, cores, logo) é carregada do backend por organização após o login (`obter_branding_atual`), e aplicada nas telas de login, seleção de inventário e scanner.
+
+## Fallback de produto não encontrado
+
+Quando um código não existe no inventário, o app permite continuar como **produto externo** para não bloquear a coleta. O fallback IA por foto está previsto no backend web (`identifyProductByImage`) e atualmente retorna stub controlado.
 
 ## Nome do app
 

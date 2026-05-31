@@ -7,13 +7,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
+import { DEFAULT_BRAND } from '../config/brand';
+import { useBrand } from '../config/brand-context';
 import { listarInventarios, buscarInventarioPorCodigo, type Inventario } from '../services/collector';
 import type { InventorySelectScreenProps } from '../types/navigation';
 
-const PRIMARY = '#FF6B35';
-const DARK = '#0B1220';
-
 export default function InventorySelectScreen({ navigation }: InventorySelectScreenProps) {
+  const { brand, resetBrand } = useBrand();
+  const PRIMARY = brand.corPrimaria || DEFAULT_BRAND.corPrimaria;
+  const DARK = brand.corSecundaria || DEFAULT_BRAND.corSecundaria;
   const [inventarios, setInventarios] = useState<Inventario[]>([]);
   const [loading, setLoading] = useState(true);
   const [codigo, setCodigo] = useState('');
@@ -49,7 +51,11 @@ export default function InventorySelectScreen({ navigation }: InventorySelectScr
     }
   };
 
-  const logout = () => supabase.auth.signOut().then(() => navigation.replace('Login'));
+  const logout = () =>
+    supabase.auth.signOut().then(() => {
+      resetBrand();
+      navigation.replace('Login');
+    });
 
   return (
     <SafeAreaView style={styles.container}>

@@ -4,6 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { supabase } from './src/config/supabase';
+import { BrandProvider } from './src/config/brand-context';
 import LoginScreen from './src/screens/LoginScreen';
 import InventorySelectScreen from './src/screens/InventorySelectScreen';
 import ScannerScreen from './src/screens/ScannerScreen';
@@ -35,17 +36,19 @@ export default function App() {
   }
 
   return (
-    <SafeAreaProvider>
-      <NavigationContainer>
-        <Stack.Navigator
-          initialRouteName={hasSession ? 'InventorySelect' : 'Login'}
-          screenOptions={{ headerShown: false }}
-        >
-          <Stack.Screen name="Login" component={LoginScreen} />
-          <Stack.Screen name="InventorySelect" component={InventorySelectScreen} />
-          <Stack.Screen name="Scanner" component={ScannerScreen} />
-        </Stack.Navigator>
-      </NavigationContainer>
-    </SafeAreaProvider>
+    <BrandProvider>
+      <SafeAreaProvider>
+        <NavigationContainer>
+          <Stack.Navigator
+            initialRouteName={hasSession ? 'InventorySelect' : 'Login'}
+            screenOptions={{ headerShown: false }}
+          >
+            <Stack.Screen name="Login" component={LoginScreen} />
+            <Stack.Screen name="InventorySelect" component={InventorySelectScreen} />
+            <Stack.Screen name="Scanner" component={ScannerScreen} />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </SafeAreaProvider>
+    </BrandProvider>
   );
 }

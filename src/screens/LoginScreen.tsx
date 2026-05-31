@@ -7,14 +7,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
-import { fetchBrand, DEFAULT_BRAND, type Brand } from '../config/brand';
+import { DEFAULT_BRAND } from '../config/brand';
+import { useBrand } from '../config/brand-context';
 import type { LoginScreenProps } from '../types/navigation';
 
 export default function LoginScreen({ navigation }: LoginScreenProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [brand] = useState<Brand>(DEFAULT_BRAND);
+  const { brand, reloadBrand } = useBrand();
 
   const handleLogin = async () => {
     const e = email.trim();
@@ -28,7 +29,7 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
       const { error } = await supabase.auth.signInWithPassword({ email: e, password: p });
       if (error) throw error;
       // White-label: resolve a marca da organização do usuário após o login.
-      await fetchBrand().catch(() => DEFAULT_BRAND);
+      await reloadBrand().catch(() => DEFAULT_BRAND);
       navigation.replace('InventorySelect');
     } catch (err: any) {
       Alert.alert('Erro de login', err?.message ?? 'Falha ao autenticar.');
@@ -38,7 +39,7 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: brand.corSecundaria }]}>
+    <SafeAreaView style={[styles.container, { backgroundColor: brand.corSecundaria || DEFAULT_BRAND.corSecundaria }]}>
       <StatusBar style="light" />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
@@ -46,12 +47,12 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
             {brand.logoUrl ? (
               <Image source={{ uri: brand.logoUrl }} style={styles.logo} resizeMode="contain" />
             ) : (
-              <View style={[styles.logoPlaceholder, { backgroundColor: brand.corPrimaria }]}>
+              <View style={[styles.logoPlaceholder, { backgroundColor: brand.corPrimaria || DEFAULT_BRAND.corPrimaria }]}>
                 <Ionicons name="cube" size={48} color="#FFF" />
               </View>
             )}
             <Text style={styles.appName}>{brand.nome}</Text>
-            <Text style={[styles.subtitle, { color: brand.corPrimaria }]}>Coleta de Inventário</Text>
+            <Text style={[styles.subtitle, { color: brand.corPrimaria || DEFAULT_BRAND.corPrimaria }]}>Coleta de Inventário</Text>
           </View>
 
           <View style={styles.form}>
@@ -75,7 +76,7 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
               secureTextEntry
             />
             <TouchableOpacity
-              style={[styles.button, { backgroundColor: brand.corPrimaria }, loading && { opacity: 0.6 }]}
+              style={[styles.button, { backgroundColor: brand.corPrimaria || DEFAULT_BRAND.corPrimaria }, loading && { opacity: 0.6 }]}
               onPress={handleLogin}
               disabled={loading}
             >

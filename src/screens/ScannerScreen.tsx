@@ -9,18 +9,20 @@ import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { processScan } from '../lib/barcode';
+import { DEFAULT_BRAND } from '../config/brand';
+import { useBrand } from '../config/brand-context';
 import {
   consultarProduto, registrarColeta, registrarAvaria, LOTES,
 } from '../services/collector';
 import type { ScannerScreenProps } from '../types/navigation';
 
-const PRIMARY = '#FF6B35';
-const DARK = '#0B1220';
-
 type ScanMode = 'camera' | 'manual';
 type Item = { code: string; name: string; isExternal?: boolean };
 
 export default function ScannerScreen({ navigation, route }: ScannerScreenProps) {
+  const { brand } = useBrand();
+  const PRIMARY = brand.corPrimaria || DEFAULT_BRAND.corPrimaria;
+  const DARK = brand.corSecundaria || DEFAULT_BRAND.corSecundaria;
   const { inventario } = route.params;
 
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -28,6 +30,8 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
   const [isScanning, setIsScanning] = useState(true);
   const [manualCode, setManualCode] = useState('');
   const [item, setItem] = useState<Item | null>(null);
+  const [notFoundCode, setNotFoundCode] = useState<string | null>(null);
+  const [externalName, setExternalName] = useState('');
   const [quantity, setQuantity] = useState('');
   const [loadingProduct, setLoadingProduct] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -64,15 +68,32 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     try {
       const found = await consultarProduto(inventario.id, result.productCode);
       if (!found) {
-        // Produto não encontrado — paridade GSS: poderia oferecer foto/IA (TODO server fn).
+        setNotFoundCode(result.productCode);
         Alert.alert(
           'Produto não encontrado',
           `O código ${result.productCode} não está neste inventário.`,
-          [{ text: 'OK', onPress: () => setIsScanning(true) }],
+          [
+            { text: 'Cancelar', style: 'cancel', onPress: () => setIsScanning(true) },
+            {
+              text: 'Cadastrar externo',
+              onPress: () => {
+                setItem({
+                  code: result.productCode,
+                  name: buildExternalProductName('', result.productCode),
+                  isExternal: true,
+                });
+                setExternalName('');
+                setQuantity('');
+                setTimeout(() => qtyRef.current?.focus(), 250);
+              },
+            },
+          ],
         );
         return;
       }
+      setNotFoundCode(null);
       setItem({ code: result.productCode, name: found.produto.nome_produto });
+      setExternalName('');
       setQuantity('');
       setTimeout(() => qtyRef.current?.focus(), 250);
     } catch (e: any) {
@@ -150,6 +171,8 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       Vibration.vibrate(150);
       toast(isAvaria ? `${selectedLote} registrada com sucesso!` : 'Coletado com sucesso!');
       setItem(null);
+      setNotFoundCode(null);
+      setExternalName('');
       setQuantity('');
       setManualCode('');
       setPhotoUri(null);
@@ -238,8 +261,26 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
         <View style={styles.card}>
           <Text style={styles.cardLabel}>Produto Identificado</Text>
-          <Row label="Código" value={item?.code ?? '—'} />
+          <Row label="Código" value={item?.code ?? notFoundCode ?? '—'} />
           <Row label="Produto" value={loadingProduct ? 'Buscando...' : item?.name ?? '—'} />
+          {item?.isExternal && (
+            <View style={styles.qtyRow}>
+              <Text style={styles.rowLabel}>Nome</Text>
+              <TextInput
+                style={styles.qtyInput}
+                value={externalName}
+                onChangeText={(text) => {
+                  setExternalName(text);
+                  setItem((prev) => {
+                    if (!prev) return prev;
+                    return { ...prev, name: buildExternalProductName(text, prev.code) };
+                  });
+                }}
+                placeholder="Nome do produto externo"
+                placeholderTextColor="#aaa"
+              />
+            </View>
+          )}
           <View style={styles.qtyRow}>
             <Text style={styles.rowLabel}>Quantidade</Text>
             <TextInput
@@ -330,6 +371,12 @@ function Row({ label, value }: { label: string; value: string }) {
       <Text style={styles.rowValue} numberOfLines={2}>{value}</Text>
     </View>
   );
+}
+
+function buildExternalProductName(input: string, fallbackCode: string) {
+  const trimmed = input.trim();
+  if (!trimmed) return `Produto ${fallbackCode}`;
+  return trimmed;
 }
 
 const styles = StyleSheet.create({
