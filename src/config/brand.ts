@@ -1,6 +1,7 @@
 // White-label: identidade visual resolvida por organização (após login).
-// Espelha clear-stock-scope/src/config/brand.ts no lado web.
+// Fallback = design system InvStock (cyan), não mais o laranja legado GSS.
 import { supabase } from './supabase';
+import { INVSTOCK_THEME } from './invstock-theme';
 
 export type Brand = {
   nome: string;
@@ -10,10 +11,10 @@ export type Brand = {
 };
 
 export const DEFAULT_BRAND: Brand = {
-  nome: 'Coletor Estoque',
+  nome: 'InvStock Coletor',
   logoUrl: null,
-  corPrimaria: '#FF6B35',
-  corSecundaria: '#0B1220',
+  corPrimaria: INVSTOCK_THEME.primary,
+  corSecundaria: INVSTOCK_THEME.background,
 };
 
 // Busca o branding da organização do usuário autenticado via RPC obter_branding_atual().

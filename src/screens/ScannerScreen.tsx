@@ -9,15 +9,17 @@ import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { processScan } from '../lib/barcode';
+import { useExternalScanner } from '../hooks/useExternalScanner';
 import { DEFAULT_BRAND } from '../config/brand';
 import { useBrand } from '../config/brand-context';
 import {
-  consultarProduto, registrarColeta, registrarAvaria, LOTES,
+  consultarProduto, registrarColeta, registrarAvaria, identificarProdutoPorImagem, LOTES,
 } from '../services/collector';
+import * as FileSystem from 'expo-file-system/legacy';
 import type { ScannerScreenProps } from '../types/navigation';
 
-type ScanMode = 'camera' | 'manual';
-type Item = { code: string; name: string; isExternal?: boolean };
+type ScanMode = 'camera' | 'manual' | 'external';
+type Item = { code: string; name: string; isExternal?: boolean; isFromAi?: boolean };
 
 export default function ScannerScreen({ navigation, route }: ScannerScreenProps) {
   const { brand } = useBrand();
@@ -46,6 +48,13 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
   const [showDatePicker, setShowDatePicker] = useState(false);
 
   const qtyRef = useRef<TextInput>(null);
+  const buscandoRef = useRef(false);
+  const lastScanRef = useRef<{ code: string; at: number }>({ code: '', at: 0 });
+
+  const externalScanner = useExternalScanner(
+    (code) => { void buscarProduto(code); },
+    scanMode === 'external' && !item,
+  );
 
   useEffect(() => {
     (async () => {
@@ -56,15 +65,87 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
 
   const toast = (msg: string) => Alert.alert('', msg);
 
+  const identificarPorFoto = async (productCode: string) => {
+    const { status } = await Camera.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      toast('Permissão de câmera necessária para identificar por foto.');
+      return;
+    }
+    const res = await ImagePicker.launchCameraAsync({ quality: 0.7, allowsEditing: false });
+    if (res.canceled) return;
+
+    buscandoRef.current = true;
+    setLoadingProduct(true);
+    try {
+      const base64 = await FileSystem.readAsStringAsync(res.assets[0].uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const ia = await identificarProdutoPorImagem({
+        inventarioId: inventario.id,
+        codigoBarras: productCode,
+        imageBase64: base64,
+        mimeType: 'image/jpeg',
+      });
+      if (!ia.found || !ia.product_name) {
+        toast('Não foi possível identificar o produto pela foto. Tente outro ângulo ou cadastre como externo.');
+        setIsScanning(true);
+        if (scanMode === 'external') externalScanner.refocus();
+        return;
+      }
+      setNotFoundCode(null);
+      setItem({
+        code: productCode,
+        name: `${ia.product_name} (IA)`,
+        isExternal: true,
+        isFromAi: true,
+      });
+      setExternalName(ia.product_name.replace(/\s\(IA\)$/, ''));
+      setQuantity('');
+      setTimeout(() => qtyRef.current?.focus(), 250);
+    } catch (e: any) {
+      toast(e?.message ?? 'Erro ao identificar produto por foto.');
+      setIsScanning(true);
+      if (scanMode === 'external') externalScanner.refocus();
+    } finally {
+      buscandoRef.current = false;
+      setLoadingProduct(false);
+    }
+  };
+
+  const cycleScanMode = () => {
+    setScanMode((prev) => {
+      if (prev === 'camera') return 'manual';
+      if (prev === 'manual') return 'external';
+      return 'camera';
+    });
+    setManualCode('');
+    externalScanner.clear();
+    setIsScanning(true);
+    Vibration.vibrate(50);
+  };
+
   const buscarProduto = async (rawCode: string) => {
+    if (buscandoRef.current) return;
+
     const result = processScan(rawCode);
     if (!result.ok || !result.productCode) {
       toast(result.message ?? 'Código inválido.');
       setIsScanning(true);
       return;
     }
+
+    const now = Date.now();
+    if (
+      lastScanRef.current.code === result.productCode
+      && now - lastScanRef.current.at < 1500
+    ) {
+      return;
+    }
+    lastScanRef.current = { code: result.productCode, at: now };
+
     setIsScanning(false);
     Vibration.vibrate(80);
+    buscandoRef.current = true;
     setLoadingProduct(true);
     const productCode = result.productCode;
     try {
@@ -75,7 +156,19 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
           'Produto não encontrado',
           `O código ${productCode} não está neste inventário.`,
           [
-            { text: 'Cancelar', style: 'cancel', onPress: () => setIsScanning(true) },
+            {
+              text: 'Cancelar',
+              style: 'cancel',
+              onPress: () => {
+                setNotFoundCode(null);
+                setIsScanning(true);
+                if (scanMode === 'external') externalScanner.refocus();
+              },
+            },
+            {
+              text: 'Identificar por foto',
+              onPress: () => { void identificarPorFoto(productCode); },
+            },
             {
               text: 'Cadastrar externo',
               onPress: () => {
@@ -101,7 +194,9 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     } catch (e: any) {
       toast(e?.message ?? 'Erro ao buscar produto.');
       setIsScanning(true);
+      if (scanMode === 'external') externalScanner.refocus();
     } finally {
+      buscandoRef.current = false;
       setLoadingProduct(false);
     }
   };
@@ -180,6 +275,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       setPhotoUri(null);
       setExpiryDate(null);
       setIsScanning(true);
+      if (scanMode === 'external') externalScanner.clear();
     } catch (e: any) {
       toast(`Erro ao salvar: ${e?.message ?? 'desconhecido'}`);
     } finally {
@@ -195,11 +291,13 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: DARK }]} edges={['top', 'bottom']}>
-      <Modal visible={submitting} transparent animationType="fade">
+      <Modal visible={loadingProduct || submitting} transparent animationType="fade">
         <View style={styles.overlay}>
           <View style={styles.loadingBox}>
             <ActivityIndicator size="large" color={primary} />
-            <Text style={styles.loadingTxt}>Enviando para o servidor...</Text>
+            <Text style={styles.loadingTxt}>
+              {submitting ? 'Enviando para o servidor...' : 'Buscando produto...'}
+            </Text>
           </View>
         </View>
       </Modal>
@@ -214,11 +312,14 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
           <Text style={styles.headerTitle}>{inventario.nome}</Text>
           <Text style={styles.headerSub}>{inventario.codigo_acesso ?? inventario.id.slice(0, 8)}</Text>
         </View>
-        <TouchableOpacity
-          onPress={() => { setScanMode((m) => (m === 'camera' ? 'manual' : 'camera')); setIsScanning(true); }}
-          style={styles.modeBtn}
-        >
-          <Ionicons name={scanMode === 'camera' ? 'keypad' : 'camera'} size={18} color="#333" />
+        <TouchableOpacity onPress={cycleScanMode} style={styles.modeBtn}>
+          {scanMode === 'camera' ? (
+            <Ionicons name="camera" size={18} color="#333" />
+          ) : scanMode === 'manual' ? (
+            <MaterialIcons name="keyboard" size={18} color="#333" />
+          ) : (
+            <MaterialIcons name="qr-code-scanner" size={18} color="#333" />
+          )}
         </TouchableOpacity>
       </View>
 
@@ -241,7 +342,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
             barcodeScannerSettings={{ barcodeTypes: ['qr', 'ean13', 'ean8', 'code128', 'code39'] }}
           />
         </View>
-      ) : (
+      ) : scanMode === 'manual' ? (
         <View style={styles.manualBox}>
           <TextInput
             style={styles.manualInput}
@@ -258,6 +359,36 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
             <Ionicons name="search" size={20} color="#FFF" />
           </TouchableOpacity>
         </View>
+      ) : (
+        <View style={styles.externalBox}>
+          <Text style={styles.externalBanner}>Coletor externo ativo</Text>
+          <TextInput
+            ref={externalScanner.inputRef}
+            style={[
+              styles.externalInput,
+              externalScanner.focused && styles.externalInputFocused,
+            ]}
+            value={externalScanner.displayCode}
+            placeholder="Aguardando leitura do laser..."
+            placeholderTextColor="#888"
+            onChangeText={externalScanner.onChangeText}
+            onKeyPress={externalScanner.onKeyPress}
+            onSubmitEditing={externalScanner.onSubmitEditing}
+            blurOnSubmit={false}
+            keyboardType="numeric"
+            showSoftInputOnFocus={false}
+            caretHidden={false}
+            selectionColor={primary}
+            onFocus={() => externalScanner.setFocused(true)}
+            onBlur={() => {
+              externalScanner.setFocused(false);
+              if (scanMode === 'external' && !item) externalScanner.refocus();
+            }}
+          />
+          {externalScanner.focused && (
+            <Text style={styles.externalReady}>Pronto para leitura — aponte o leitor</Text>
+          )}
+        </View>
       )}
 
       <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
@@ -265,6 +396,9 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
           <Text style={styles.cardLabel}>Produto Identificado</Text>
           <Row label="Código" value={item?.code ?? notFoundCode ?? '—'} />
           <Row label="Produto" value={loadingProduct ? 'Buscando...' : item?.name ?? '—'} />
+          {item?.isFromAi && (
+            <Text style={styles.aiHint}>Identificado por IA (Gemini)</Text>
+          )}
           {item?.isExternal && (
             <View style={styles.qtyRow}>
               <Text style={styles.rowLabel}>Nome</Text>
@@ -410,8 +544,23 @@ const createStyles = (primary: string) => StyleSheet.create({
   manualBox: { flexDirection: 'row', marginHorizontal: 16, gap: 8 },
   manualInput: { flex: 1, backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: '#000' },
   manualBtn: { backgroundColor: primary, borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
+  externalBox: {
+    marginHorizontal: 16, backgroundColor: '#FFF', borderRadius: 12, padding: 14,
+    borderWidth: 2, borderColor: primary,
+  },
+  externalBanner: {
+    color: primary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase',
+    marginBottom: 8, textAlign: 'center',
+  },
+  externalInput: {
+    borderWidth: 1.5, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 12,
+    paddingVertical: 12, fontSize: 18, color: '#111', textAlign: 'center', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  externalInputFocused: { borderColor: primary, backgroundColor: '#F0F9FF' },
+  externalReady: { marginTop: 8, textAlign: 'center', color: '#64748B', fontSize: 12 },
   card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderLeftWidth: 3, borderLeftColor: primary },
   cardLabel: { color: primary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', marginBottom: 8 },
+  aiHint: { fontSize: 11, color: '#64748B', marginBottom: 4, textAlign: 'right' },
   rowLabel: { color: '#666', fontSize: 13, fontWeight: '600', minWidth: 80 },
   qtyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 8 },
   qtyInput: {

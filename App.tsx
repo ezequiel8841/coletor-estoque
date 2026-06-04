@@ -5,6 +5,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { supabase } from './src/config/supabase';
 import { BrandProvider, useBrand } from './src/config/brand-context';
+import { DEFAULT_BRAND } from './src/config/brand';
 import LoginScreen from './src/screens/LoginScreen';
 import InventorySelectScreen from './src/screens/InventorySelectScreen';
 import ScannerScreen from './src/screens/ScannerScreen';
@@ -42,8 +43,8 @@ function AppNavigator() {
 
   if (loading) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0B1220' }}>
-        <ActivityIndicator size="large" color="#FF6B35" />
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: DEFAULT_BRAND.corSecundaria }}>
+        <ActivityIndicator size="large" color={DEFAULT_BRAND.corPrimaria} />
       </View>
     );
   }

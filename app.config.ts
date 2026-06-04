@@ -5,9 +5,9 @@ import type { ExpoConfig } from 'expo/config';
  * A anon key NÃO deve ir hardcoded aqui — use EAS Secrets (ver README).
  */
 const config: ExpoConfig = {
-  name: 'Coletor Estoque',
+  name: 'InvStock Coletor',
   slug: 'coletor-estoque',
-  version: '1.0.0',
+  version: '1.0.1',
   orientation: 'portrait',
   userInterfaceStyle: 'light',
   ios: {
@@ -17,9 +17,11 @@ const config: ExpoConfig = {
   android: {
     permissions: ['android.permission.CAMERA'],
     package: 'com.invstock.coletorestoque',
-    versionCode: 1,
+    versionCode: 2,
   },
   plugins: [
+    'expo-font',
+    '@react-native-community/datetimepicker',
     [
       'expo-camera',
       {
@@ -30,7 +32,7 @@ const config: ExpoConfig = {
   ],
   extra: {
     eas: {
-      // Preenchido automaticamente ao rodar: npx eas init / eas build:configure
+      projectId: '2f6266f9-9918-4d03-be70-1694102b6fe5',
     },
   },
 };
