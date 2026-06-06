@@ -28,7 +28,8 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "https://aygjmtoubunzozpfxvrq.supabase.co"
+        "EXPO_PUBLIC_SUPABASE_URL": "https://aygjmtoubunzozpfxvrq.supabase.co",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF5Z2ptdG91YnVuem96cGZ4dnJxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3NjI3MTEsImV4cCI6MjA5NTMzODcxMX0.i_AuKLz0d0ETGs3HIoFlyA9Wj2n4xI7tUBHHrjBdwl0"
       }
     }
   },

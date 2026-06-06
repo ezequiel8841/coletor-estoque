@@ -7,7 +7,9 @@ import { supabase } from '../config/supabase';
 import { barcodeVariations } from '../lib/barcode';
 import { withTimeout } from '../lib/with-timeout';
 
-const REQUEST_TIMEOUT_MS = 20_000;
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+const RPC_MISSING_RE = /Could not find the function|42883|PGRST202/i;
 
 export type Inventario = {
   id: string;
@@ -50,6 +52,75 @@ function buildBarcodeOrFilter(variations: string[]): string {
     .join(',');
 }
 
+function matchVariation(
+  item: Pick<Produto, 'codigo_produto' | 'codigo_barras_principal'> & {
+    codigo_barras_2?: string | null;
+    codigo_barras_3?: string | null;
+  },
+  variations: string[],
+  fallback: string,
+): string {
+  return (
+    variations.find(
+      (v) =>
+        item.codigo_barras_principal === v
+        || item.codigo_barras_2 === v
+        || item.codigo_barras_3 === v
+        || item.codigo_produto === v,
+    ) ?? fallback
+  );
+}
+
+async function buscarItemDireto(
+  inventarioId: string,
+  variations: string[],
+  productCode: string,
+  timeoutMsg: string,
+): Promise<{ produto: Produto; codigoUsado: string } | null> {
+  const { data, error } = await withTimeout(
+    supabase
+      .from('itens_inventario')
+      .select('id, codigo_produto, nome_produto, codigo_barras_principal, codigo_barras_2, codigo_barras_3')
+      .eq('inventario_id', inventarioId)
+      .or(buildBarcodeOrFilter(variations))
+      .limit(1)
+      .maybeSingle(),
+    REQUEST_TIMEOUT_MS,
+    timeoutMsg,
+  );
+  if (error) throw new Error(error.message);
+  if (!data) return null;
+  return {
+    produto: data as Produto,
+    codigoUsado: matchVariation(data as Produto, variations, productCode),
+  };
+}
+
+async function buscarItemRpc(
+  inventarioId: string,
+  productCode: string,
+  variations: string[],
+  timeoutMsg: string,
+): Promise<{ produto: Produto; codigoUsado: string } | null> {
+  const { data, error } = await withTimeout(
+    supabase.rpc('consultar_produto_inventario', {
+      p_inventario_id: inventarioId,
+      p_codigo: productCode,
+    }),
+    REQUEST_TIMEOUT_MS,
+    timeoutMsg,
+  );
+  if (error) {
+    if (RPC_MISSING_RE.test(error.message)) return null;
+    throw new Error(error.message);
+  }
+  if (!data) return null;
+  return {
+    produto: data as Produto,
+    codigoUsado: matchVariation(data as Produto, variations, productCode),
+  };
+}
+
 /** Inventários acessíveis ao usuário (RLS já filtra por organização/empresa). */
 export async function listarInventarios(): Promise<Inventario[]> {
   const { data, error } = await withTimeout(
@@ -59,6 +130,7 @@ export async function listarInventarios(): Promise<Inventario[]> {
       .in('status', ['scheduled', 'in_progress'])
       .order('criado_em', { ascending: false }),
     REQUEST_TIMEOUT_MS,
+    'Tempo esgotado ao carregar inventários.',
   );
   if (error) throw new Error(error.message);
   return (data ?? []) as Inventario[];
@@ -73,66 +145,31 @@ export async function buscarInventarioPorCodigo(codigo: string): Promise<Inventa
       .eq('codigo_acesso', codigo.trim())
       .maybeSingle(),
     REQUEST_TIMEOUT_MS,
+    'Tempo esgotado ao buscar inventário.',
   );
   if (error) throw new Error(error.message);
   return (data as Inventario) ?? null;
 }
 
 /**
- * Consulta um produto no inventário (RPC server-side com fallback em 1 query).
+ * Consulta um produto no inventário.
+ * Query direta primeiro (RLS); RPC como fallback se existir no banco.
  */
 export async function consultarProduto(
   inventarioId: string,
   productCode: string,
 ): Promise<{ produto: Produto; codigoUsado: string } | null> {
   const variations = barcodeVariations(productCode);
-  let useFallback = false;
+  const timeoutMsg = 'Tempo esgotado ao buscar produto. Verifique a conexão.';
 
-  for (const variation of variations) {
-    const { data, error } = await withTimeout(
-      supabase.rpc('consultar_produto_inventario', {
-        p_inventario_id: inventarioId,
-        p_codigo: variation,
-      }),
-      REQUEST_TIMEOUT_MS,
-    );
-
-    if (error) {
-      if (/Could not find the function|42883|PGRST202/i.test(error.message)) {
-        useFallback = true;
-        break;
-      }
-      throw new Error(error.message);
-    }
-    if (data) {
-      return { produto: data as Produto, codigoUsado: variation };
-    }
+  try {
+    const direto = await buscarItemDireto(inventarioId, variations, productCode, timeoutMsg);
+    if (direto) return direto;
+  } catch (e) {
+    console.warn('[consultarProduto] query direta falhou, tentando RPC:', e);
   }
 
-  if (!useFallback) return null;
-
-  const { data, error } = await withTimeout(
-    supabase
-      .from('itens_inventario')
-      .select('id, codigo_produto, nome_produto, codigo_barras_principal, codigo_barras_2, codigo_barras_3')
-      .eq('inventario_id', inventarioId)
-      .or(buildBarcodeOrFilter(variations))
-      .limit(1)
-      .maybeSingle(),
-    REQUEST_TIMEOUT_MS,
-  );
-  if (error) throw new Error(error.message);
-  if (!data) return null;
-
-  const matched =
-    variations.find(
-      (v) =>
-        data.codigo_barras_principal === v
-        || data.codigo_barras_2 === v
-        || data.codigo_barras_3 === v
-        || data.codigo_produto === v,
-    ) ?? productCode;
-  return { produto: data as Produto, codigoUsado: matched };
+  return buscarItemRpc(inventarioId, productCode, variations, timeoutMsg);
 }
 
 /** Registra uma coleta via RPC (insere evento + recalcula quantidade_contada). */
@@ -189,6 +226,7 @@ export async function registrarAvaria(params: {
       upsert: false,
     }),
     REQUEST_TIMEOUT_MS,
+    'Tempo esgotado no upload da imagem.',
   );
   if (upErr) throw new Error(`Falha no upload da imagem: ${upErr.message}`);
 
@@ -214,6 +252,7 @@ export async function registrarAvaria(params: {
       .select('id')
       .single(),
     REQUEST_TIMEOUT_MS,
+    'Tempo esgotado ao registrar avaria.',
   );
   if (error) throw new Error(error.message);
   return data as { id: string };
@@ -227,16 +266,16 @@ export async function identificarProdutoPorImagem(params: {
   mimeType?: string;
 }): Promise<{ found: boolean; product_name: string | null; brand: string | null; code: string | null }> {
   const { data, error } = await withTimeout(
-    supabase.functions.invoke("identify-product-image", {
+    supabase.functions.invoke('identify-product-image', {
       body: {
         inventario_id: params.inventarioId,
         codigo_barras: params.codigoBarras,
         image_base64: params.imageBase64,
-        mime_type: params.mimeType ?? "image/jpeg",
+        mime_type: params.mimeType ?? 'image/jpeg',
       },
     }),
     REQUEST_TIMEOUT_MS,
-    "Tempo esgotado ao identificar produto por foto.",
+    'Tempo esgotado ao identificar produto por foto.',
   );
   if (error) throw new Error(error.message);
   const payload = data as {

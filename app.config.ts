@@ -7,7 +7,7 @@ import type { ExpoConfig } from 'expo/config';
 const config: ExpoConfig = {
   name: 'InvStock Coletor',
   slug: 'coletor-estoque',
-  version: '1.0.1',
+  version: '1.0.2',
   orientation: 'portrait',
   userInterfaceStyle: 'light',
   ios: {
@@ -17,7 +17,7 @@ const config: ExpoConfig = {
   android: {
     permissions: ['android.permission.CAMERA'],
     package: 'com.invstock.coletorestoque',
-    versionCode: 2,
+    versionCode: 3,
   },
   plugins: [
     'expo-font',

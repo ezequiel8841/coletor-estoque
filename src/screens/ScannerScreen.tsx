@@ -14,6 +14,7 @@ import { DEFAULT_BRAND } from '../config/brand';
 import { useBrand } from '../config/brand-context';
 import {
   consultarProduto, registrarColeta, registrarAvaria, identificarProdutoPorImagem, LOTES,
+  REQUEST_TIMEOUT_MS,
 } from '../services/collector';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { ScannerScreenProps } from '../types/navigation';
@@ -63,7 +64,10 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     })();
   }, []);
 
-  const toast = (msg: string) => Alert.alert('', msg);
+  const toast = (msg: string) => {
+    // Alert sobre Modal trava no Android — espera o modal fechar.
+    setTimeout(() => Alert.alert('', msg), 150);
+  };
 
   const identificarPorFoto = async (productCode: string) => {
     const { status } = await Camera.requestCameraPermissionsAsync();
@@ -124,6 +128,11 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     Vibration.vibrate(50);
   };
 
+  const clearProductLoading = () => {
+    buscandoRef.current = false;
+    setLoadingProduct(false);
+  };
+
   const buscarProduto = async (rawCode: string) => {
     if (buscandoRef.current) return;
 
@@ -148,11 +157,18 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     buscandoRef.current = true;
     setLoadingProduct(true);
     const productCode = result.productCode;
+    setNotFoundCode(productCode);
+    const safetyTimer = setTimeout(() => {
+      if (!buscandoRef.current) return;
+      clearProductLoading();
+      toast('Tempo esgotado ao buscar produto. Verifique a conexão.');
+      setIsScanning(true);
+      if (scanMode === 'external') externalScanner.refocus();
+    }, REQUEST_TIMEOUT_MS + 2_000);
     try {
       const found = await consultarProduto(inventario.id, productCode);
       if (!found) {
-        setNotFoundCode(productCode);
-        Alert.alert(
+        setTimeout(() => Alert.alert(
           'Produto não encontrado',
           `O código ${productCode} não está neste inventário.`,
           [
@@ -183,7 +199,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
               },
             },
           ],
-        );
+        ), 150);
         return;
       }
       setNotFoundCode(null);
@@ -196,8 +212,8 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       setIsScanning(true);
       if (scanMode === 'external') externalScanner.refocus();
     } finally {
-      buscandoRef.current = false;
-      setLoadingProduct(false);
+      clearTimeout(safetyTimer);
+      clearProductLoading();
     }
   };
 
