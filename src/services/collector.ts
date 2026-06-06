@@ -5,6 +5,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../config/supabase';
 import { barcodeVariations } from '../lib/barcode';
+import { rpcCall, tableQuery } from '../lib/supabase-rest';
 import { withTimeout } from '../lib/with-timeout';
 
 export const REQUEST_TIMEOUT_MS = 15_000;
@@ -41,15 +42,71 @@ export const LOTES = [
   'VENCIMENTO',
 ];
 
-function buildBarcodeOrFilter(variations: string[]): string {
-  return variations
-    .flatMap((v) => [
-      `codigo_barras_principal.eq.${v}`,
-      `codigo_barras_2.eq.${v}`,
-      `codigo_barras_3.eq.${v}`,
-      `codigo_produto.eq.${v}`,
-    ])
-    .join(',');
+function buildVariationOrFilter(variation: string): string {
+  return [
+    `codigo_barras_principal.eq.${variation}`,
+    `codigo_barras_2.eq.${variation}`,
+    `codigo_barras_3.eq.${variation}`,
+    `codigo_produto.eq.${variation}`,
+  ].join(',');
+}
+
+function encodeQuery(params: Record<string, string>): string {
+  return Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+}
+
+async function buscarItemPorVariacoes(
+  inventarioId: string,
+  variations: string[],
+  productCode: string,
+): Promise<{ produto: Produto; codigoUsado: string } | null> {
+  const select = 'id,codigo_produto,nome_produto,codigo_barras_principal,codigo_barras_2,codigo_barras_3';
+
+  for (const variation of variations) {
+    const query = encodeQuery({
+      select,
+      inventario_id: `eq.${inventarioId}`,
+      or: `(${buildVariationOrFilter(variation)})`,
+      limit: '1',
+    });
+    const rows = await tableQuery<Produto[]>(
+      'itens_inventario',
+      query,
+      REQUEST_TIMEOUT_MS,
+    );
+    const item = Array.isArray(rows) ? rows[0] : null;
+    if (item) {
+      return {
+        produto: item,
+        codigoUsado: matchVariation(item, variations, productCode),
+      };
+    }
+  }
+  return null;
+}
+
+async function buscarItemRpc(
+  inventarioId: string,
+  productCode: string,
+  variations: string[],
+): Promise<{ produto: Produto; codigoUsado: string } | null> {
+  try {
+    const data = await rpcCall<Produto | null>('consultar_produto_inventario', {
+      p_inventario_id: inventarioId,
+      p_codigo: productCode,
+    });
+    if (!data) return null;
+    return {
+      produto: data,
+      codigoUsado: matchVariation(data, variations, productCode),
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (RPC_MISSING_RE.test(msg)) return null;
+    throw e;
+  }
 }
 
 function matchVariation(
@@ -69,56 +126,6 @@ function matchVariation(
         || item.codigo_produto === v,
     ) ?? fallback
   );
-}
-
-async function buscarItemDireto(
-  inventarioId: string,
-  variations: string[],
-  productCode: string,
-  timeoutMsg: string,
-): Promise<{ produto: Produto; codigoUsado: string } | null> {
-  const { data, error } = await withTimeout(
-    supabase
-      .from('itens_inventario')
-      .select('id, codigo_produto, nome_produto, codigo_barras_principal, codigo_barras_2, codigo_barras_3')
-      .eq('inventario_id', inventarioId)
-      .or(buildBarcodeOrFilter(variations))
-      .limit(1)
-      .maybeSingle(),
-    REQUEST_TIMEOUT_MS,
-    timeoutMsg,
-  );
-  if (error) throw new Error(error.message);
-  if (!data) return null;
-  return {
-    produto: data as Produto,
-    codigoUsado: matchVariation(data as Produto, variations, productCode),
-  };
-}
-
-async function buscarItemRpc(
-  inventarioId: string,
-  productCode: string,
-  variations: string[],
-  timeoutMsg: string,
-): Promise<{ produto: Produto; codigoUsado: string } | null> {
-  const { data, error } = await withTimeout(
-    supabase.rpc('consultar_produto_inventario', {
-      p_inventario_id: inventarioId,
-      p_codigo: productCode,
-    }),
-    REQUEST_TIMEOUT_MS,
-    timeoutMsg,
-  );
-  if (error) {
-    if (RPC_MISSING_RE.test(error.message)) return null;
-    throw new Error(error.message);
-  }
-  if (!data) return null;
-  return {
-    produto: data as Produto,
-    codigoUsado: matchVariation(data as Produto, variations, productCode),
-  };
 }
 
 /** Inventários acessíveis ao usuário (RLS já filtra por organização/empresa). */
@@ -152,24 +159,18 @@ export async function buscarInventarioPorCodigo(codigo: string): Promise<Inventa
 }
 
 /**
- * Consulta um produto no inventário.
- * Query direta primeiro (RLS); RPC como fallback se existir no banco.
+ * Consulta um produto no inventário via REST nativo (fetch), contornando hang do supabase-js no Android.
  */
 export async function consultarProduto(
   inventarioId: string,
   productCode: string,
 ): Promise<{ produto: Produto; codigoUsado: string } | null> {
   const variations = barcodeVariations(productCode);
-  const timeoutMsg = 'Tempo esgotado ao buscar produto. Verifique a conexão.';
 
-  try {
-    const direto = await buscarItemDireto(inventarioId, variations, productCode, timeoutMsg);
-    if (direto) return direto;
-  } catch (e) {
-    console.warn('[consultarProduto] query direta falhou, tentando RPC:', e);
-  }
+  const rpc = await buscarItemRpc(inventarioId, productCode, variations);
+  if (rpc) return rpc;
 
-  return buscarItemRpc(inventarioId, productCode, variations, timeoutMsg);
+  return buscarItemPorVariacoes(inventarioId, variations, productCode);
 }
 
 /** Registra uma coleta via RPC (insere evento + recalcula quantidade_contada). */
@@ -182,21 +183,16 @@ export async function registrarColeta(params: {
   produtoNome?: string;
 }): Promise<{ total_coletado: number; produto: string }> {
   if (params.quantidade <= 0) throw new Error('Quantidade deve ser maior que zero.');
-  const { data, error } = await withTimeout(
-    supabase.rpc('registrar_coleta', {
-      p_inventario_id: params.inventarioId,
-      p_codigo: params.codigo,
-      p_quantidade: params.quantidade,
-      p_lote: params.lote ?? null,
-      p_tipo_coleta: 'coletor',
-      p_is_produto_externo: params.isProdutoExterno ?? false,
-      p_produto_nome: params.produtoNome ?? null,
-    }),
-    REQUEST_TIMEOUT_MS,
-    'Tempo esgotado ao salvar a coleta. Verifique a conexão.',
-  );
-  if (error) throw new Error(error.message);
-  return data as { total_coletado: number; produto: string };
+  const data = await rpcCall<{ total_coletado: number; produto: string }>('registrar_coleta', {
+    p_inventario_id: params.inventarioId,
+    p_codigo: params.codigo,
+    p_quantidade: params.quantidade,
+    p_lote: params.lote ?? null,
+    p_tipo_coleta: 'coletor',
+    p_is_produto_externo: params.isProdutoExterno ?? false,
+    p_produto_nome: params.produtoNome ?? null,
+  });
+  return data;
 }
 
 /**
