@@ -123,3 +123,18 @@ export function processScan(raw: string): {
     message: extracted.message ?? corrected.message,
   };
 }
+
+/** Leitura de número de série — preserva alfanumérico (não remove letras). */
+export function processScanSerial(raw: string): {
+  ok: boolean;
+  serial?: string;
+  message?: string;
+} {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return { ok: false, message: 'Número de série vazio.' };
+  const serial = trimmed.toUpperCase().replace(/\s+/g, '');
+  if (!/^[A-Z0-9\-_.]+$/.test(serial)) {
+    return { ok: false, message: 'Número de série inválido.' };
+  }
+  return { ok: true, serial };
+}

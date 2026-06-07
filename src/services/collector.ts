@@ -1,34 +1,60 @@
 // ============================================================================
-// Serviço do coletor — fala direto com o Supabase do InvStock (RLS protege).
-// Substitui as APIs PHP do GSS (api_coletor.php / coletas_avarias.php).
+// Serviço do coletor — offline-first com fallback Supabase REST.
 // ============================================================================
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../config/supabase';
-import { barcodeVariations } from '../lib/barcode';
-import { rpcCall, tableQuery } from '../lib/supabase-rest';
+import { getUserIdCache, rpcCall } from '../lib/supabase-rest';
 import { withTimeout } from '../lib/with-timeout';
+import { buscarProdutoLocal, generateLocalId, inserirAvariaLocal, inserirColetaLocal, isCatalogReady, serialJaColetadoLocal } from './local-db';
+import { triggerQueueSync } from './sync';
 
-export const REQUEST_TIMEOUT_MS = 15_000;
-
-const RPC_MISSING_RE = /Could not find the function|42883|PGRST202/i;
+export const REQUEST_TIMEOUT_MS = 10_000;
+export const LOOKUP_TIMEOUT_MS = 8_000;
+export const SAVE_TIMEOUT_MS = 30_000;
 
 export type Inventario = {
   id: string;
   nome: string;
   setor: string;
-  status: 'scheduled' | 'in_progress' | 'completed';
+  status: 'aberto' | 'em_andamento' | 'divergencia' | 'concluido';
   codigo_acesso: string | null;
   organizacao_id: string;
 };
+
+const STATUS_LABEL: Record<Inventario['status'], string> = {
+  aberto: 'Aberto',
+  em_andamento: 'Em andamento',
+  divergencia: 'Divergência',
+  concluido: 'Concluído',
+};
+
+export function inventarioStatusLabel(status: string): string {
+  return STATUS_LABEL[status as Inventario['status']] ?? status;
+}
+
+const COLETA_STATUSES: Inventario['status'][] = ['em_andamento', 'divergencia'];
+
+export function inventarioAceitaColeta(status: string): boolean {
+  return COLETA_STATUSES.includes(status as Inventario['status']);
+}
 
 export type Produto = {
   id: string;
   codigo_produto: string;
   nome_produto: string;
   codigo_barras_principal: string | null;
+  modo_contagem?: 'quantidade' | 'numero_serie';
+  numero_serie?: string | null;
+  serie_esperada?: boolean;
 };
 
-// Lotes fixos (paridade com o GSS). AVARIA/VENCIMENTO exigem foto (+ data no vencimento).
+export type ProdutoLookup = {
+  produto: Produto;
+  codigoUsado: string;
+  fromCache: boolean;
+  numeroSerie?: string | null;
+};
+
 export const LOTES = [
   'Area de venda',
   'Deposito',
@@ -38,142 +64,168 @@ export const LOTES = [
   'Lote 3',
   'Lote 4',
   'Lote 5',
+  'RMA',
   'AVARIA',
   'VENCIMENTO',
 ];
 
-function buildVariationOrFilter(variation: string): string {
-  return [
-    `codigo_barras_principal.eq.${variation}`,
-    `codigo_barras_2.eq.${variation}`,
-    `codigo_barras_3.eq.${variation}`,
-    `codigo_produto.eq.${variation}`,
-  ].join(',');
+const INVENTARIO_SELECT = 'id,nome,setor,status,codigo_acesso,organizacao_id';
+const CODIGO_ACESSO_RE = /^[A-Za-z0-9]{6}$/;
+
+export function normalizarCodigoAcesso(codigo: string): string {
+  return codigo.trim().toUpperCase();
 }
 
-function encodeQuery(params: Record<string, string>): string {
-  return Object.entries(params)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-    .join('&');
+export function codigoAcessoValido(codigo: string): boolean {
+  return CODIGO_ACESSO_RE.test(codigo.trim());
 }
 
-async function buscarItemPorVariacoes(
-  inventarioId: string,
-  variations: string[],
-  productCode: string,
-): Promise<{ produto: Produto; codigoUsado: string } | null> {
-  const select = 'id,codigo_produto,nome_produto,codigo_barras_principal,codigo_barras_2,codigo_barras_3';
-
-  for (const variation of variations) {
-    const query = encodeQuery({
-      select,
-      inventario_id: `eq.${inventarioId}`,
-      or: `(${buildVariationOrFilter(variation)})`,
-      limit: '1',
-    });
-    const rows = await tableQuery<Produto[]>(
-      'itens_inventario',
-      query,
-      REQUEST_TIMEOUT_MS,
-    );
-    const item = Array.isArray(rows) ? rows[0] : null;
-    if (item) {
-      return {
-        produto: item,
-        codigoUsado: matchVariation(item, variations, productCode),
-      };
-    }
-  }
-  return null;
+function mapInventarioRow(row: Inventario): Inventario {
+  return {
+    id: row.id,
+    nome: row.nome,
+    setor: row.setor,
+    status: row.status,
+    codigo_acesso: row.codigo_acesso,
+    organizacao_id: row.organizacao_id,
+  };
 }
 
-async function buscarItemRpc(
-  inventarioId: string,
-  productCode: string,
-  variations: string[],
-): Promise<{ produto: Produto; codigoUsado: string } | null> {
-  try {
-    const data = await rpcCall<Produto | null>('consultar_produto_inventario', {
-      p_inventario_id: inventarioId,
-      p_codigo: productCode,
-    });
-    if (!data) return null;
-    return {
-      produto: data,
-      codigoUsado: matchVariation(data, variations, productCode),
-    };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (RPC_MISSING_RE.test(msg)) return null;
-    throw e;
-  }
-}
-
-function matchVariation(
-  item: Pick<Produto, 'codigo_produto' | 'codigo_barras_principal'> & {
-    codigo_barras_2?: string | null;
-    codigo_barras_3?: string | null;
-  },
-  variations: string[],
-  fallback: string,
-): string {
-  return (
-    variations.find(
-      (v) =>
-        item.codigo_barras_principal === v
-        || item.codigo_barras_2 === v
-        || item.codigo_barras_3 === v
-        || item.codigo_produto === v,
-    ) ?? fallback
-  );
-}
-
-/** Inventários acessíveis ao usuário (RLS já filtra por organização/empresa). */
+/** Inventários acessíveis ao usuário (em andamento / divergência). */
 export async function listarInventarios(): Promise<Inventario[]> {
-  const { data, error } = await withTimeout(
-    supabase
-      .from('inventarios')
-      .select('id, nome, setor, status, codigo_acesso, organizacao_id')
-      .in('status', ['scheduled', 'in_progress'])
-      .order('criado_em', { ascending: false }),
-    REQUEST_TIMEOUT_MS,
-    'Tempo esgotado ao carregar inventários.',
-  );
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Inventario[];
+  const data = await rpcCall<Inventario[]>('listar_inventarios_coletor', {}, REQUEST_TIMEOUT_MS);
+  return (data ?? []).map(mapInventarioRow);
 }
 
-/** Resolve inventário pelo código de acesso curto (paridade com o token GSS). */
 export async function buscarInventarioPorCodigo(codigo: string): Promise<Inventario | null> {
-  const { data, error } = await withTimeout(
-    supabase
-      .from('inventarios')
-      .select('id, nome, setor, status, codigo_acesso, organizacao_id')
-      .eq('codigo_acesso', codigo.trim())
-      .maybeSingle(),
+  const normalized = normalizarCodigoAcesso(codigo);
+  if (!codigoAcessoValido(normalized)) {
+    throw new Error('O código de acesso deve ter 6 caracteres (letras ou números).');
+  }
+  const row = await rpcCall<Inventario | null>(
+    'buscar_inventario_por_codigo_coletor',
+    { p_codigo: normalized },
     REQUEST_TIMEOUT_MS,
-    'Tempo esgotado ao buscar inventário.',
   );
-  if (error) throw new Error(error.message);
-  return (data as Inventario) ?? null;
+  const inv = row ? mapInventarioRow(row) : null;
+  if (inv && !inventarioAceitaColeta(inv.status)) {
+    throw new Error('Inventário não iniciado. Peça para iniciar a contagem na web.');
+  }
+  return inv;
 }
 
-/**
- * Consulta um produto no inventário via REST nativo (fetch), contornando hang do supabase-js no Android.
- */
+/** Consulta produto — cache local primeiro, RPC como fallback. */
 export async function consultarProduto(
   inventarioId: string,
   productCode: string,
-): Promise<{ produto: Produto; codigoUsado: string } | null> {
-  const variations = barcodeVariations(productCode);
+): Promise<ProdutoLookup | null> {
+  const cached = await isCatalogReady(inventarioId);
+  if (cached) {
+    const local = await buscarProdutoLocal(inventarioId, productCode, 'auto');
+    if (local) return { ...local, fromCache: true };
+  }
 
-  const rpc = await buscarItemRpc(inventarioId, productCode, variations);
-  if (rpc) return rpc;
-
-  return buscarItemPorVariacoes(inventarioId, variations, productCode);
+  try {
+    const data = await rpcCall<Produto | null>(
+      'consultar_produto_inventario',
+      {
+        p_inventario_id: inventarioId,
+        p_codigo: productCode,
+        p_modo_busca: 'auto',
+      },
+      LOOKUP_TIMEOUT_MS,
+    );
+    if (!data) return null;
+    const produto: Produto = {
+      id: data.id,
+      codigo_produto: data.codigo_produto,
+      nome_produto: data.nome_produto,
+      codigo_barras_principal: data.codigo_barras_principal,
+      modo_contagem: (data as Produto).modo_contagem ?? 'quantidade',
+      numero_serie: (data as Produto).numero_serie ?? null,
+      serie_esperada: (data as Produto).serie_esperada,
+    };
+    return {
+      produto,
+      codigoUsado: productCode,
+      fromCache: false,
+      numeroSerie: produto.numero_serie ?? null,
+    };
+  } catch {
+    if (cached) {
+      const local = await buscarProdutoLocal(inventarioId, productCode, 'auto');
+      if (local) return { ...local, fromCache: true };
+      return null;
+    }
+    throw new Error('Sem conexão e catálogo não disponível offline.');
+  }
 }
 
-/** Registra uma coleta via RPC (insere evento + recalcula quantidade_contada). */
+/** RPC direto — usado pela fila de sincronização. */
+export async function registrarColetaCloud(params: {
+  inventarioId: string;
+  codigo: string;
+  quantidade: number;
+  lote?: string | null;
+  isProdutoExterno?: boolean;
+  produtoNome?: string;
+  itemId?: string;
+  numeroSerie?: string | null;
+}): Promise<{ total_coletado: number; produto: string }> {
+  if (params.quantidade <= 0) throw new Error('Quantidade deve ser maior que zero.');
+  return rpcCall(
+    'registrar_coleta',
+    {
+      p_inventario_id: params.inventarioId,
+      p_codigo: params.codigo,
+      p_quantidade: params.quantidade,
+      p_lote: params.lote ?? null,
+      p_tipo_coleta: 'coletor',
+      p_is_produto_externo: params.isProdutoExterno ?? false,
+      p_produto_nome: params.produtoNome ?? null,
+      ...(params.itemId ? { p_item_id: params.itemId } : {}),
+      ...(params.numeroSerie ? { p_numero_serie: params.numeroSerie } : {}),
+    },
+    SAVE_TIMEOUT_MS,
+  );
+}
+
+/** Salva coleta localmente (otimista) e enfileira sync em background. */
+export async function salvarColeta(params: {
+  inventarioId: string;
+  codigo: string;
+  quantidade: number;
+  lote?: string | null;
+  isProdutoExterno?: boolean;
+  produtoNome?: string;
+  itemId?: string;
+  nomeExibicao: string;
+  numeroSerie?: string | null;
+}): Promise<{ localId: string }> {
+  if (params.numeroSerie) {
+    if (params.quantidade !== 1) throw new Error('Itens com série exigem quantidade 1.');
+    const dup = await serialJaColetadoLocal(params.inventarioId, params.numeroSerie);
+    if (dup) throw new Error('Número de série já coletado neste inventário.');
+  } else if (params.quantidade <= 0) {
+    throw new Error('Quantidade deve ser maior que zero.');
+  }
+  const coleta = await inserirColetaLocal({
+    inventarioId: params.inventarioId,
+    codigo: params.codigo,
+    quantidade: params.numeroSerie ? 1 : params.quantidade,
+    lote: params.lote,
+    isProdutoExterno: params.isProdutoExterno,
+    produtoNome: params.produtoNome,
+    itemId: params.itemId,
+    usuarioId: getUserIdCache(),
+    nomeExibicao: params.nomeExibicao,
+    numeroSerie: params.numeroSerie ?? null,
+  });
+  triggerQueueSync();
+  return { localId: coleta.id };
+}
+
+/** @deprecated Use salvarColeta — mantido para compatibilidade com fluxo online direto. */
 export async function registrarColeta(params: {
   inventarioId: string;
   codigo: string;
@@ -181,24 +233,74 @@ export async function registrarColeta(params: {
   lote?: string | null;
   isProdutoExterno?: boolean;
   produtoNome?: string;
+  itemId?: string;
 }): Promise<{ total_coletado: number; produto: string }> {
   if (params.quantidade <= 0) throw new Error('Quantidade deve ser maior que zero.');
-  const data = await rpcCall<{ total_coletado: number; produto: string }>('registrar_coleta', {
-    p_inventario_id: params.inventarioId,
-    p_codigo: params.codigo,
-    p_quantidade: params.quantidade,
-    p_lote: params.lote ?? null,
-    p_tipo_coleta: 'coletor',
-    p_is_produto_externo: params.isProdutoExterno ?? false,
-    p_produto_nome: params.produtoNome ?? null,
-  });
-  return data;
+  return rpcCall(
+    'registrar_coleta',
+    {
+      p_inventario_id: params.inventarioId,
+      p_codigo: params.codigo,
+      p_quantidade: params.quantidade,
+      p_lote: params.lote ?? null,
+      p_tipo_coleta: 'coletor',
+      p_is_produto_externo: params.isProdutoExterno ?? false,
+      p_produto_nome: params.produtoNome ?? null,
+      ...(params.itemId ? { p_item_id: params.itemId } : {}),
+    },
+    SAVE_TIMEOUT_MS,
+  );
 }
 
-/**
- * Registra avaria/vencimento: faz upload da foto no bucket inventory-damages
- * (pasta = organizacao_id) e insere em avarias_inventario com url_imagem.
- */
+async function persistirImagemAvaria(imagemUri: string, localId: string): Promise<string> {
+  const dir = `${FileSystem.documentDirectory}coletor_avarias/`;
+  await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+  const dest = `${dir}${localId}.jpg`;
+  await FileSystem.copyAsync({ from: imagemUri, to: dest });
+  return dest;
+}
+
+/** Salva avaria/vencimento localmente (otimista) e enfileira sync em background. */
+export async function salvarAvaria(params: {
+  organizacaoId: string;
+  inventarioId: string;
+  codigo: string;
+  nomeProduto: string;
+  quantidade: number;
+  tipo: 'avaria' | 'vencimento';
+  imagemUri: string;
+  dataVencimento?: Date;
+  observacoes?: string;
+}): Promise<{ localId: string }> {
+  if (params.quantidade <= 0) throw new Error('Quantidade deve ser maior que zero.');
+
+  const observacoes =
+    params.observacoes ??
+    (params.dataVencimento
+      ? `Validade: ${params.dataVencimento.toISOString().slice(0, 10)}`
+      : null);
+
+  const localId = generateLocalId();
+  const imagemPersistida = await persistirImagemAvaria(params.imagemUri, localId);
+
+  const coleta = await inserirAvariaLocal({
+    id: localId,
+    inventarioId: params.inventarioId,
+    organizacaoId: params.organizacaoId,
+    codigo: params.codigo,
+    quantidade: params.quantidade,
+    nomeExibicao: params.nomeProduto,
+    tipoRegistro: params.tipo,
+    imagemUri: imagemPersistida,
+    observacoes,
+    usuarioId: getUserIdCache(),
+  });
+
+  triggerQueueSync();
+  return { localId: coleta.id };
+}
+
+/** @deprecated Use salvarAvaria */
 export async function registrarAvaria(params: {
   organizacaoId: string;
   inventarioId: string;
@@ -210,51 +312,10 @@ export async function registrarAvaria(params: {
   dataVencimento?: Date;
   observacoes?: string;
 }): Promise<{ id: string }> {
-  const base64 = await FileSystem.readAsStringAsync(params.imagemUri, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  const bytes = decodeBase64(base64);
-  const path = `${params.organizacaoId}/${params.inventarioId}/${Date.now()}.jpg`;
-
-  const { error: upErr } = await withTimeout(
-    supabase.storage.from('inventory-damages').upload(path, bytes, {
-      contentType: 'image/jpeg',
-      upsert: false,
-    }),
-    REQUEST_TIMEOUT_MS,
-    'Tempo esgotado no upload da imagem.',
-  );
-  if (upErr) throw new Error(`Falha no upload da imagem: ${upErr.message}`);
-
-  const { data: pub } = supabase.storage.from('inventory-damages').getPublicUrl(path);
-
-  const { data, error } = await withTimeout(
-    supabase
-      .from('avarias_inventario')
-      .insert({
-        organizacao_id: params.organizacaoId,
-        inventario_id: params.inventarioId,
-        codigo_produto: params.codigo,
-        nome_produto: params.nomeProduto,
-        quantidade: params.quantidade,
-        tipo: params.tipo,
-        observacoes:
-          params.observacoes ??
-          (params.dataVencimento
-            ? `Validade: ${params.dataVencimento.toISOString().slice(0, 10)}`
-            : null),
-        url_imagem: pub.publicUrl,
-      })
-      .select('id')
-      .single(),
-    REQUEST_TIMEOUT_MS,
-    'Tempo esgotado ao registrar avaria.',
-  );
-  if (error) throw new Error(error.message);
-  return data as { id: string };
+  const result = await salvarAvaria(params);
+  return { id: result.localId };
 }
 
-/** Identifica produto por foto via Edge Function (Gemini no Supabase — chave nunca no app). */
 export async function identificarProdutoPorImagem(params: {
   inventarioId: string;
   codigoBarras: string;
@@ -288,26 +349,4 @@ export async function identificarProdutoPorImagem(params: {
     brand: payload.brand ?? null,
     code: payload.code ?? params.codigoBarras,
   };
-}
-
-function decodeBase64(b64: string): Uint8Array {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const lookup = new Uint8Array(256);
-  for (let i = 0; i < chars.length; i++) lookup[chars.charCodeAt(i)] = i;
-  const len = b64.length;
-  let bufferLength = len * 0.75;
-  if (b64[len - 1] === '=') bufferLength--;
-  if (b64[len - 2] === '=') bufferLength--;
-  const bytes = new Uint8Array(bufferLength);
-  let p = 0;
-  for (let i = 0; i < len; i += 4) {
-    const e1 = lookup[b64.charCodeAt(i)];
-    const e2 = lookup[b64.charCodeAt(i + 1)];
-    const e3 = lookup[b64.charCodeAt(i + 2)];
-    const e4 = lookup[b64.charCodeAt(i + 3)];
-    bytes[p++] = (e1 << 2) | (e2 >> 4);
-    if (p < bufferLength) bytes[p++] = ((e2 & 15) << 4) | (e3 >> 2);
-    if (p < bufferLength) bytes[p++] = ((e3 & 3) << 6) | (e4 & 63);
-  }
-  return bytes;
 }

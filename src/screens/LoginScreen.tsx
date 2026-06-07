@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../config/supabase';
+import { setAccessTokenCache, setUserIdCache } from '../lib/supabase-rest';
 import { DEFAULT_BRAND } from '../config/brand';
 import { useBrand } from '../config/brand-context';
 import type { LoginScreenProps } from '../types/navigation';
@@ -26,11 +27,15 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
     }
     setLoading(true);
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email: e, password: p });
+      const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
       if (error) throw error;
+      if (data.session?.access_token) {
+        setAccessTokenCache(data.session.access_token, data.session.expires_at ?? 0);
+        if (data.session.user?.id) setUserIdCache(data.session.user.id);
+      }
       // White-label: resolve a marca da organização do usuário após o login.
       await reloadBrand().catch(() => DEFAULT_BRAND);
-      navigation.replace('InventorySelect');
+      navigation.replace('ModuleHub');
     } catch (err: any) {
       Alert.alert('Erro de login', err?.message ?? 'Falha ao autenticar.');
     } finally {
@@ -47,12 +52,10 @@ export default function LoginScreen({ navigation }: LoginScreenProps) {
             {brand.logoUrl ? (
               <Image source={{ uri: brand.logoUrl }} style={styles.logo} resizeMode="contain" />
             ) : (
-              <View style={[styles.logoPlaceholder, { backgroundColor: brand.corPrimaria || DEFAULT_BRAND.corPrimaria }]}>
-                <Ionicons name="cube" size={48} color="#FFF" />
-              </View>
+              <Image source={require('../../assets/coletor-default.png')} style={styles.logo} resizeMode="contain" />
             )}
             <Text style={styles.appName}>{brand.nome}</Text>
-            <Text style={[styles.subtitle, { color: brand.corPrimaria || DEFAULT_BRAND.corPrimaria }]}>Coleta de Inventário</Text>
+            <Text style={[styles.subtitle, { color: brand.corDestaque || brand.corPrimaria || DEFAULT_BRAND.corDestaque }]}>Coleta de Inventário</Text>
           </View>
 
           <View style={styles.form}>

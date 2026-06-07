@@ -8,25 +8,35 @@ import { CameraView, Camera } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
-import { processScan } from '../lib/barcode';
+import { processScan, processScanSerial } from '../lib/barcode';
 import { useExternalScanner } from '../hooks/useExternalScanner';
 import { DEFAULT_BRAND } from '../config/brand';
 import { useBrand } from '../config/brand-context';
 import {
-  consultarProduto, registrarColeta, registrarAvaria, identificarProdutoPorImagem, LOTES,
+  consultarProduto, salvarColeta, salvarAvaria, identificarProdutoPorImagem, LOTES,
   REQUEST_TIMEOUT_MS,
 } from '../services/collector';
+import { isCatalogReady } from '../services/local-db';
 import * as FileSystem from 'expo-file-system/legacy';
 import type { ScannerScreenProps } from '../types/navigation';
 
 type ScanMode = 'camera' | 'manual' | 'external';
-type Item = { code: string; name: string; isExternal?: boolean; isFromAi?: boolean };
+type Item = {
+  code: string;
+  name: string;
+  itemId?: string;
+  isExternal?: boolean;
+  isFromAi?: boolean;
+  modoContagem?: 'quantidade' | 'numero_serie';
+  resolvedSerial?: string;
+};
 
 export default function ScannerScreen({ navigation, route }: ScannerScreenProps) {
   const { brand } = useBrand();
   const primary = brand.corPrimaria || DEFAULT_BRAND.corPrimaria;
+  const accent = brand.corDestaque || primary;
   const DARK = brand.corSecundaria || DEFAULT_BRAND.corSecundaria;
-  const styles = React.useMemo(() => createStyles(primary), [primary]);
+  const styles = React.useMemo(() => createStyles(primary, accent), [primary, accent]);
   const { inventario } = route.params;
 
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
@@ -37,8 +47,11 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
   const [notFoundCode, setNotFoundCode] = useState<string | null>(null);
   const [externalName, setExternalName] = useState('');
   const [quantity, setQuantity] = useState('');
+  const [serialNumber, setSerialNumber] = useState('');
+  const [awaitingSerial, setAwaitingSerial] = useState(false);
   const [loadingProduct, setLoadingProduct] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+
+  const serialRef = useRef<TextInput>(null);
 
   const [selectedLote, setSelectedLote] = useState<string>(LOTES[0]);
   const [showLoteModal, setShowLoteModal] = useState(false);
@@ -133,31 +146,70 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     setLoadingProduct(false);
   };
 
+  const limparProduto = () => {
+    setItem(null);
+    setNotFoundCode(null);
+    setExternalName('');
+    setQuantity('');
+    setSerialNumber('');
+    setAwaitingSerial(false);
+    setManualCode('');
+    setPhotoUri(null);
+    setExpiryDate(null);
+    setIsScanning(true);
+    lastScanRef.current = { code: '', at: 0 };
+    if (scanMode === 'external') {
+      externalScanner.clear();
+      externalScanner.refocus();
+    }
+    Vibration.vibrate(40);
+  };
+
+  const resolveLookupCode = (rawCode: string): {
+    ok: boolean;
+    code?: string;
+    serial?: string;
+    message?: string;
+  } => {
+    const result = processScan(rawCode);
+    if (result.ok && result.productCode) {
+      return { ok: true, code: result.productCode };
+    }
+    const sr = processScanSerial(rawCode);
+    if (sr.ok && sr.serial) {
+      return { ok: true, code: sr.serial, serial: sr.serial };
+    }
+    return { ok: false, message: result.message ?? sr.message ?? 'Código inválido.' };
+  };
+
   const buscarProduto = async (rawCode: string) => {
     if (buscandoRef.current) return;
 
-    const result = processScan(rawCode);
-    if (!result.ok || !result.productCode) {
-      toast(result.message ?? 'Código inválido.');
+    const resolved = resolveLookupCode(rawCode);
+    if (!resolved.ok || !resolved.code) {
+      toast(resolved.message ?? 'Código inválido.');
       setIsScanning(true);
       return;
     }
 
+    const lookupCode = resolved.code;
+    const preResolvedSerial = resolved.serial;
+
     const now = Date.now();
     if (
-      lastScanRef.current.code === result.productCode
+      lastScanRef.current.code === lookupCode
       && now - lastScanRef.current.at < 1500
     ) {
       return;
     }
-    lastScanRef.current = { code: result.productCode, at: now };
+    lastScanRef.current = { code: lookupCode, at: now };
 
     setIsScanning(false);
     Vibration.vibrate(80);
     buscandoRef.current = true;
-    setLoadingProduct(true);
-    const productCode = result.productCode;
-    setNotFoundCode(productCode);
+    setNotFoundCode(lookupCode);
+    const hasCache = await isCatalogReady(inventario.id);
+    if (!hasCache) setLoadingProduct(true);
     const safetyTimer = setTimeout(() => {
       if (!buscandoRef.current) return;
       clearProductLoading();
@@ -166,11 +218,11 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       if (scanMode === 'external') externalScanner.refocus();
     }, REQUEST_TIMEOUT_MS + 2_000);
     try {
-      const found = await consultarProduto(inventario.id, productCode);
+      const found = await consultarProduto(inventario.id, lookupCode);
       if (!found) {
         setTimeout(() => Alert.alert(
           'Produto não encontrado',
-          `O código ${productCode} não está neste inventário.`,
+          `O código ${lookupCode} não está neste inventário.`,
           [
             {
               text: 'Cancelar',
@@ -181,32 +233,83 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
                 if (scanMode === 'external') externalScanner.refocus();
               },
             },
-            {
+            ...(preResolvedSerial ? [] : [{
               text: 'Identificar por foto',
-              onPress: () => { void identificarPorFoto(productCode); },
-            },
-            {
+              onPress: () => { void identificarPorFoto(lookupCode); },
+            }]),
+            ...(preResolvedSerial ? [] : [{
               text: 'Cadastrar externo',
               onPress: () => {
                 setItem({
-                  code: productCode,
-                  name: buildExternalProductName('', productCode),
+                  code: lookupCode,
+                  name: buildExternalProductName('', lookupCode),
                   isExternal: true,
+                  modoContagem: 'quantidade',
                 });
                 setExternalName('');
                 setQuantity('');
+                setSerialNumber('');
+                setAwaitingSerial(false);
                 setTimeout(() => qtyRef.current?.focus(), 250);
               },
-            },
+            }]),
           ],
         ), 150);
         return;
       }
       setNotFoundCode(null);
-      setItem({ code: productCode, name: found.produto.nome_produto });
+      const modo = found.produto.modo_contagem ?? 'quantidade';
+      const serialFromLookup = modo === 'numero_serie'
+        ? (preResolvedSerial ?? found.numeroSerie ?? found.produto.numero_serie ?? undefined)
+        : undefined;
+      const productCode = found.produto.codigo_barras_principal
+        || found.produto.codigo_produto
+        || lookupCode;
+
+      if (modo === 'numero_serie' && serialFromLookup) {
+        setItem({
+          code: productCode,
+          name: found.produto.nome_produto,
+          itemId: found.produto.id,
+          modoContagem: 'numero_serie',
+          resolvedSerial: serialFromLookup,
+        });
+        setQuantity('1');
+        setSerialNumber(serialFromLookup);
+        setAwaitingSerial(false);
+        return;
+      }
+
+      if (modo === 'numero_serie' && !serialFromLookup) {
+        setItem({
+          code: productCode,
+          name: found.produto.nome_produto,
+          itemId: found.produto.id,
+          modoContagem: 'numero_serie',
+        });
+        setExternalName('');
+        setQuantity('1');
+        setSerialNumber('');
+        setAwaitingSerial(true);
+        setTimeout(() => serialRef.current?.focus(), 250);
+        return;
+      }
+
+      setItem({
+        code: productCode,
+        name: found.produto.nome_produto,
+        itemId: found.produto.id,
+        modoContagem: modo,
+        resolvedSerial: serialFromLookup,
+      });
       setExternalName('');
-      setQuantity('');
-      setTimeout(() => qtyRef.current?.focus(), 250);
+      setQuantity(modo === 'numero_serie' ? '1' : '');
+      setSerialNumber(serialFromLookup ?? '');
+      setAwaitingSerial(false);
+      setTimeout(() => {
+        if (modo === 'numero_serie') serialRef.current?.focus();
+        else qtyRef.current?.focus();
+      }, 250);
     } catch (e: any) {
       toast(e?.message ?? 'Erro ao buscar produto.');
       setIsScanning(true);
@@ -218,7 +321,20 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
   };
 
   const handleBarcodeScanned = ({ data }: { data: string }) => {
-    if (!isScanning) return;
+    if (!isScanning && !(awaitingSerial && item)) return;
+    if (awaitingSerial && item) {
+      const sr = processScanSerial(data);
+      if (sr.ok && sr.serial) {
+        setSerialNumber(sr.serial);
+        setAwaitingSerial(false);
+        setItem({ ...item, modoContagem: 'numero_serie', resolvedSerial: sr.serial });
+        setQuantity('1');
+        Vibration.vibrate(80);
+      } else {
+        toast(sr.message ?? 'Número de série inválido.');
+      }
+      return;
+    }
     buscarProduto(data);
   };
 
@@ -233,10 +349,21 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
 
   const handleSave = async () => {
     if (!item) return toast('Escaneie um produto primeiro.');
-    if (!quantity.trim()) return toast('Informe a quantidade.');
-    const qtd = parseFloat(quantity.replace(',', '.'));
+    const isSerial = item.modoContagem === 'numero_serie';
+    if (isSerial) {
+      const serialResult = processScanSerial(serialNumber || '');
+      if (!serialResult.ok || !serialResult.serial) {
+        return toast('Informe ou escaneie o número de série.');
+      }
+    } else if (!quantity.trim()) {
+      return toast('Informe a quantidade.');
+    }
+    const qtd = isSerial ? 1 : parseFloat(quantity.replace(',', '.'));
     if (isNaN(qtd) || qtd <= 0) return toast('Quantidade deve ser maior que zero.');
     if (!selectedLote) return toast('Selecione um lote.');
+
+    const serialResult = isSerial ? processScanSerial(serialNumber) : null;
+    const serial = serialResult?.ok ? serialResult.serial : undefined;
 
     const isAvaria = selectedLote === 'AVARIA' || selectedLote === 'VENCIMENTO';
     if (isAvaria && !photoUri) {
@@ -249,19 +376,18 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
     }
 
     Alert.alert('Confirmar Coleta',
-      `Produto: ${item.name}\nCódigo: ${item.code}\nQtd: ${qtd}\nLote: ${selectedLote}`,
+      `Produto: ${item.name}\nCódigo: ${item.code}${serial ? `\nSérie: ${serial}` : ''}\nQtd: ${qtd}\nLote: ${selectedLote}`,
       [
         { text: 'Cancelar', style: 'cancel' },
-        { text: 'Confirmar', onPress: () => executeSave(qtd, isAvaria) },
+        { text: 'Confirmar', onPress: () => executeSave(qtd, isAvaria, serial) },
       ]);
   };
 
-  const executeSave = async (qtd: number, isAvaria: boolean) => {
+  const executeSave = async (qtd: number, isAvaria: boolean, numeroSerie?: string) => {
     if (!item) return;
-    setSubmitting(true);
     try {
       if (isAvaria) {
-        await registrarAvaria({
+        await salvarAvaria({
           organizacaoId: inventario.organizacao_id,
           inventarioId: inventario.id,
           codigo: item.code,
@@ -272,21 +398,32 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
           dataVencimento: expiryDate ?? undefined,
         });
       } else {
-        await registrarColeta({
+        await salvarColeta({
           inventarioId: inventario.id,
           codigo: item.code,
           quantidade: qtd,
           lote: selectedLote,
           isProdutoExterno: item.isExternal,
           produtoNome: item.name,
+          itemId: item.itemId,
+          nomeExibicao: item.name,
+          numeroSerie: numeroSerie ?? null,
         });
       }
       Vibration.vibrate(150);
-      toast(isAvaria ? `${selectedLote} registrada com sucesso!` : 'Coletado com sucesso!');
+      toast(
+        isAvaria
+          ? `${selectedLote} registrada! Será sincronizada em segundo plano.`
+          : numeroSerie
+            ? `Série ${numeroSerie} coletada! Será sincronizada em segundo plano.`
+            : 'Coletado! Será sincronizado em segundo plano.',
+      );
       setItem(null);
       setNotFoundCode(null);
       setExternalName('');
       setQuantity('');
+      setSerialNumber('');
+      setAwaitingSerial(false);
       setManualCode('');
       setPhotoUri(null);
       setExpiryDate(null);
@@ -294,34 +431,30 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       if (scanMode === 'external') externalScanner.clear();
     } catch (e: any) {
       toast(`Erro ao salvar: ${e?.message ?? 'desconhecido'}`);
-    } finally {
-      setSubmitting(false);
     }
   };
 
   if (hasPermission === null) {
-    return <View style={styles.center}><ActivityIndicator color={primary} /></View>;
+    return <View style={styles.center}><ActivityIndicator color={accent} /></View>;
   }
 
   const isAvariaLote = selectedLote === 'AVARIA' || selectedLote === 'VENCIMENTO';
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: DARK }]} edges={['top', 'bottom']}>
-      <Modal visible={loadingProduct || submitting} transparent animationType="fade">
+    <SafeAreaView style={[styles.container, { backgroundColor: DARK }]} edges={['top']}>
+      <Modal visible={loadingProduct} transparent animationType="fade">
         <View style={styles.overlay}>
           <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color={primary} />
-            <Text style={styles.loadingTxt}>
-              {submitting ? 'Enviando para o servidor...' : 'Buscando produto...'}
-            </Text>
+            <ActivityIndicator size="large" color={accent} />
+            <Text style={styles.loadingTxt}>Buscando produto...</Text>
           </View>
         </View>
       </Modal>
 
       {/* Header */}
       <View style={[styles.header, { backgroundColor: primary }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Ionicons name="arrow-back" size={18} color={primary} />
+        <TouchableOpacity onPress={() => navigation.getParent()?.goBack()} style={styles.backBtn}>
+          <Ionicons name="arrow-back" size={18} color={accent} />
           <Text style={styles.backTxt}>Voltar</Text>
         </TouchableOpacity>
         <View style={{ alignItems: 'center' }}>
@@ -344,7 +477,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
         <Text style={styles.loteLabel}>Lote:</Text>
         <TouchableOpacity style={styles.loteDropdown} onPress={() => setShowLoteModal(true)}>
           <Text style={styles.loteValue}>{selectedLote}</Text>
-          <Text style={{ color: primary }}>▼</Text>
+          <Text style={{ color: accent }}>▼</Text>
         </TouchableOpacity>
       </View>
 
@@ -394,7 +527,7 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
             keyboardType="numeric"
             showSoftInputOnFocus={false}
             caretHidden={false}
-            selectionColor={primary}
+            selectionColor={accent}
             onFocus={() => externalScanner.setFocused(true)}
             onBlur={() => {
               externalScanner.setFocused(false);
@@ -409,7 +542,19 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
 
       <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
         <View style={styles.card}>
-          <Text style={styles.cardLabel}>Produto Identificado</Text>
+          <View style={styles.cardHeaderRow}>
+            <Text style={styles.cardLabel}>Produto Identificado</Text>
+            {(item || notFoundCode) && (
+              <TouchableOpacity
+                style={styles.clearBtn}
+                onPress={limparProduto}
+                accessibilityLabel="Limpar produto"
+              >
+                <Ionicons name="close-circle" size={22} color="#dc2626" />
+                <Text style={styles.clearBtnTxt}>Limpar</Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <Row label="Código" value={item?.code ?? notFoundCode ?? '—'} />
           <Row label="Produto" value={loadingProduct ? 'Buscando...' : item?.name ?? '—'} />
           {item?.isFromAi && (
@@ -433,21 +578,54 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
               />
             </View>
           )}
-          <View style={styles.qtyRow}>
-            <Text style={styles.rowLabel}>Quantidade</Text>
-            <TextInput
-              ref={qtyRef}
-              style={styles.qtyInput}
-              value={quantity}
-              onChangeText={setQuantity}
-              placeholder="Ex: 10 ou 5.5"
-              placeholderTextColor="#aaa"
-              keyboardType="numeric"
-              editable={!!item}
-              returnKeyType="done"
-              onSubmitEditing={handleSave}
-            />
-          </View>
+          {item?.modoContagem === 'numero_serie' || awaitingSerial ? (
+            <View style={styles.qtyRow}>
+              <Text style={styles.rowLabel}>Nº série</Text>
+              <TextInput
+                ref={serialRef}
+                style={styles.qtyInput}
+                value={serialNumber}
+                onChangeText={(t) => setSerialNumber(t.toUpperCase())}
+                placeholder="Escaneie ou digite a série"
+                placeholderTextColor="#aaa"
+                autoCapitalize="characters"
+                editable={!!item}
+                returnKeyType="done"
+                onSubmitEditing={() => {
+                  if (awaitingSerial && item && serialNumber.trim()) {
+                    const sr = processScanSerial(serialNumber);
+                    if (sr.ok && sr.serial) {
+                      setSerialNumber(sr.serial);
+                      setAwaitingSerial(false);
+                      setItem({ ...item, modoContagem: 'numero_serie', resolvedSerial: sr.serial });
+                      setQuantity('1');
+                    }
+                  } else {
+                    handleSave();
+                  }
+                }}
+              />
+            </View>
+          ) : (
+            <View style={styles.qtyRow}>
+              <Text style={styles.rowLabel}>Quantidade</Text>
+              <TextInput
+                ref={qtyRef}
+                style={styles.qtyInput}
+                value={quantity}
+                onChangeText={setQuantity}
+                placeholder="Ex: 10 ou 5.5"
+                placeholderTextColor="#aaa"
+                keyboardType="numeric"
+                editable={!!item}
+                returnKeyType="done"
+                onSubmitEditing={handleSave}
+              />
+            </View>
+          )}
+          {(item?.modoContagem === 'numero_serie' || awaitingSerial) && (
+            <Text style={styles.aiHint}>Contagem por série — quantidade fixa 1</Text>
+          )}
         </View>
 
         {isAvariaLote && (
@@ -470,10 +648,20 @@ export default function ScannerScreen({ navigation, route }: ScannerScreenProps)
       </ScrollView>
 
       <View style={styles.bottom}>
+        {(item || notFoundCode) && (
+          <TouchableOpacity style={styles.clearBottomBtn} onPress={limparProduto}>
+            <Ionicons name="trash-outline" size={20} color="#dc2626" />
+            <Text style={styles.clearBottomTxt}>LIMPAR</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
-          style={[styles.saveBtn, (!item || !quantity.trim()) && { backgroundColor: '#555' }]}
+          style={[
+            styles.saveBtn,
+            (!item || (item.modoContagem === 'numero_serie' ? !serialNumber.trim() : !quantity.trim())) && { backgroundColor: '#555' },
+            (item || notFoundCode) && styles.saveBtnWithClear,
+          ]}
           onPress={handleSave}
-          disabled={!item || !quantity.trim()}
+          disabled={!item || (item.modoContagem === 'numero_serie' ? !serialNumber.trim() : !quantity.trim())}
         >
           <MaterialIcons name="save" size={22} color="#FFF" />
           <Text style={styles.saveTxt}>SALVAR ITEM</Text>
@@ -537,7 +725,7 @@ const ROW_STYLES = StyleSheet.create({
   rowValue: { flex: 1, color: '#111', fontSize: 14, textAlign: 'right' },
 });
 
-const createStyles = (primary: string) => StyleSheet.create({
+const createStyles = (primary: string, accent: string) => StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: {
@@ -545,7 +733,7 @@ const createStyles = (primary: string) => StyleSheet.create({
     paddingHorizontal: 16, paddingVertical: 12,
   },
   backBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, gap: 4 },
-  backTxt: { color: primary, fontWeight: 'bold', fontSize: 12 },
+  backTxt: { color: accent, fontWeight: 'bold', fontSize: 12 },
   headerTitle: { color: '#FFF', fontWeight: 'bold', fontSize: 14 },
   headerSub: { color: '#FFF', opacity: 0.85, fontSize: 11 },
   modeBtn: { backgroundColor: '#FFF', borderRadius: 8, padding: 8 },
@@ -556,39 +744,48 @@ const createStyles = (primary: string) => StyleSheet.create({
     backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
   },
   loteValue: { color: '#111', fontWeight: '500' },
-  cameraBox: { height: 140, marginHorizontal: 16, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: primary },
+  cameraBox: { height: 140, marginHorizontal: 16, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: accent },
   manualBox: { flexDirection: 'row', marginHorizontal: 16, gap: 8 },
   manualInput: { flex: 1, backgroundColor: '#FFF', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 12, color: '#000' },
   manualBtn: { backgroundColor: primary, borderRadius: 8, paddingHorizontal: 16, justifyContent: 'center' },
   externalBox: {
     marginHorizontal: 16, backgroundColor: '#FFF', borderRadius: 12, padding: 14,
-    borderWidth: 2, borderColor: primary,
+    borderWidth: 2, borderColor: accent,
   },
   externalBanner: {
-    color: primary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase',
+    color: accent, fontSize: 11, fontWeight: '700', textTransform: 'uppercase',
     marginBottom: 8, textAlign: 'center',
   },
   externalInput: {
     borderWidth: 1.5, borderColor: '#ddd', borderRadius: 8, paddingHorizontal: 12,
     paddingVertical: 12, fontSize: 18, color: '#111', textAlign: 'center', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
-  externalInputFocused: { borderColor: primary, backgroundColor: '#F0F9FF' },
+  externalInputFocused: { borderColor: accent, backgroundColor: '#F0F9FF' },
   externalReady: { marginTop: 8, textAlign: 'center', color: '#64748B', fontSize: 12 },
-  card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderLeftWidth: 3, borderLeftColor: primary },
-  cardLabel: { color: primary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', marginBottom: 8 },
+  card: { backgroundColor: '#FFF', borderRadius: 12, padding: 14, borderLeftWidth: 3, borderLeftColor: accent },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  cardLabel: { color: accent, fontSize: 11, fontWeight: '700', textTransform: 'uppercase' },
+  clearBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 6 },
+  clearBtnTxt: { color: '#dc2626', fontSize: 12, fontWeight: '700' },
   aiHint: { fontSize: 11, color: '#64748B', marginBottom: 4, textAlign: 'right' },
   rowLabel: { color: '#666', fontSize: 13, fontWeight: '600', minWidth: 80 },
   qtyRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 8 },
   qtyInput: {
-    flex: 1, borderWidth: 2, borderColor: primary, borderRadius: 8,
+    flex: 1, borderWidth: 2, borderColor: accent, borderRadius: 8,
     paddingHorizontal: 12, paddingVertical: 8, textAlign: 'center', color: '#111', fontSize: 18,
   },
   avariaBox: { marginTop: 12, gap: 8 },
   thumb: { width: '100%', height: 120, borderRadius: 10 },
   avariaBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: primary, borderRadius: 8, paddingVertical: 12 },
   avariaBtnTxt: { color: '#FFF', fontWeight: '700' },
-  bottom: { padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)' },
-  saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: primary, borderRadius: 12, paddingVertical: 16 },
+  bottom: { padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', flexDirection: 'row', gap: 10 },
+  clearBottomBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: '#FFF', borderRadius: 12, paddingVertical: 16, borderWidth: 1, borderColor: '#dc2626',
+  },
+  clearBottomTxt: { color: '#dc2626', fontSize: 15, fontWeight: 'bold' },
+  saveBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: primary, borderRadius: 12, paddingVertical: 16 },
+  saveBtnWithClear: { flex: 2 },
   saveTxt: { color: '#FFF', fontSize: 17, fontWeight: 'bold' },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
   loadingBox: { backgroundColor: '#FFF', padding: 30, borderRadius: 14, alignItems: 'center' },

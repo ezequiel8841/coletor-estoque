@@ -17,4 +17,6 @@ export const INVSTOCK_THEME = {
   mutedForeground: '#64748B',
   /** oklch(0.92 0.02 225) — bordas */
   border: '#E2E8F0',
+  /** oklch(0.72 0.17 145) — cor de destaque / accent */
+  accent: '#22C55E',
 } as const;
